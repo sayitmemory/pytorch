@@ -839,7 +839,6 @@ void ProcessGroupNCCL::ncclCommWatchdog() {
     auto mode = cudaStreamCaptureModeGlobal;
     cudaThreadExchangeStreamCaptureMode(&mode);
     cudaThreadExchangeStreamCaptureMode(&mode);
-    LOG(INFO) << "[Rank " << rank_ << "] Count: " << count;
     workCleanupLoop();
     VLOG(2) << "[Rank " << rank_
             << "] NCCL watchdog thread terminated normally";
