@@ -14,7 +14,7 @@ import tempfile
 import time
 from datetime import datetime
 from distutils.version import LooseVersion
-from typing import Any, cast, Dict, List, Optional, Tuple, Union
+from typing import Any, cast, Dict, List, NamedTuple, Optional, Union
 
 import pkg_resources
 
@@ -1434,7 +1434,7 @@ def do_sharding(
     options,
     selected_tests: List[str],
     test_file_times: Dict[str, float],
-    sort: bool = True,
+    sort_by_time: bool = True,
 ) -> List[ShardedTest]:
     which_shard, num_shards = 1, 1
     if options.shard:
@@ -1452,7 +1452,7 @@ def do_sharding(
             selected_tests,
             test_file_times,
             must_serial=must_serial,
-            sort=sort,
+            sort_by_time=sort_by_time,
         )
         _, tests_from_shard = shards[which_shard - 1]
         selected_tests = tests_from_shard
@@ -1460,9 +1460,14 @@ def do_sharding(
     return selected_tests
 
 
+class TestFailure(NamedTuple):
+    test: str
+    message: str
+
+
 def run_test_module(
     test: Union[ShardedTest, str], test_directory: str, options
-) -> Optional[Tuple[str, str]]:
+) -> Optional[TestFailure]:
     maybe_set_hip_visible_devies()
 
     # Printing the date here can help diagnose which tests are slow
@@ -1483,14 +1488,14 @@ def run_test_module(
         # return code -N, where N is the signal number.
         signal_name = SIGNALS_TO_NAMES_DICT[-return_code]
         message += f" Received signal: {signal_name}"
-    return test, message
+    return TestFailure(test, message)
 
 
 def run_tests(
     selected_tests: List[ShardedTest],
     test_directory: str,
     options,
-    failures: List[Tuple[str, str]],
+    failures: List[TestFailure],
 ) -> None:
     if len(selected_tests) == 0:
         return
@@ -1519,12 +1524,11 @@ def run_tests(
         # Take the conftest file from the test directory
         shutil.copy(os.path.join(test_directory, "conftest.py"), cpp_conftest_file)
 
-    def handle_error_messages(failure):
+    def handle_error_messages(failure: Optional[TestFailure]):
         if failure is None:
             return False
         failures.append(failure)
-        _, err_message = failure
-        print_to_stderr(err_message)
+        print_to_stderr(failure.message)
         return True
 
     def parallel_test_completion_callback(failure):
@@ -1557,7 +1561,7 @@ def run_tests(
             and len(failures) != 0
         ):
             raise RuntimeError(
-                "\n".join(x[1] for x in failures)
+                "\n".join(x.message for x in failures)
                 + "\n\nTip: You can keep running tests even on failure by "
                 "passing --keep-going to run_test.py.\n"
                 "If running on CI, add the 'keep-going' label to "
@@ -1575,8 +1579,7 @@ def run_tests(
                 and not options.continue_through_error
                 and not RERUN_DISABLED_TESTS
             ):
-                _, err_message = failure
-                raise RuntimeError(err_message)
+                raise RuntimeError(failure.message)
 
     finally:
         pool.terminate()
@@ -1627,7 +1630,7 @@ def main():
 
     test_times_dict = download_test_times(TEST_TIMES_FILE)
     prioritized_tests = do_sharding(
-        options, prioritized_tests, test_times_dict, sort=False
+        options, prioritized_tests, test_times_dict, sort_by_time=False
     )
     general_tests = do_sharding(options, general_tests, test_times_dict)
 
@@ -1661,16 +1664,17 @@ def main():
 
     os.makedirs(REPO_ROOT / "test" / "test-reports", exist_ok=True)
 
-    failures = []
+    prioritized_failures: List[TestFailure] = []
+    general_failures: List[TestFailure] = []
     start_time = time.time()
     # First run the prioritized tests, then the remaining tests.
     try:
-        run_tests(prioritized_tests, test_directory, options, failures)
-        metrics_dict["prioritized_failures"] = [x[0] for x in failures]
+        run_tests(prioritized_tests, test_directory, options, prioritized_failures)
+        metrics_dict["prioritized_failures"] = [x.test for x in prioritized_failures]
         metrics_dict["general_start_time"] = time.time() - start_time
-        run_tests(general_tests, test_directory, options, failures)
+        run_tests(general_tests, test_directory, options, general_failures)
         metrics_dict["general_end_time"] = time.time() - start_time
-        metrics_dict["all_failures"] = [x[0] for x in failures]
+        metrics_dict["all_failures"] = [x.test for x in general_failures]
 
     finally:
         if options.coverage:
