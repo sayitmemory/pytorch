@@ -6,7 +6,7 @@ import itertools
 import logging
 import math
 import operator
-from typing import Dict, Iterable, List, Set
+from typing import Dict, Iterable, List, Set, Tuple, Union, Any, Counter, Optional
 
 import sympy
 
@@ -694,8 +694,8 @@ class IterationRangesEntry(IterationRanges):
         self.expr = expr
 
     def set_name(self, name):
-        self.codegen = lambda: name
-        self.codegen.cache_clear = lambda: None
+        self.codegen = functools.lru_cache(lambda: name)
+        self.codegen.cache_clear()
         self.name = name
 
     def cache_clear(self):
@@ -714,7 +714,7 @@ class IterationRangesEntry(IterationRanges):
 
     def precomputed_args(self):
         # for dynamic shapes, find parts of indexing expressions that have to be precomputed
-        precomputed_args = []
+        precomputed_args: List[sympy.Expr] = []
         if isinstance(self.expr, sympy.Symbol):
             return precomputed_args
         assert isinstance(self.expr, (FloorDiv, ModularIndexing)), type(self.expr)
@@ -752,7 +752,7 @@ class TritonKernel(Kernel):
         super().__init__()
         self.numels = [V.graph.sizevars.simplify(s) for s in groups]
         self.mutations = mutations
-        self.range_trees = []
+        self.range_trees: List[Any] = []
         self.range_tree_nodes = {}
         self.iter_vars_count = itertools.count()
         self.inside_reduction = self.numels[-1] != 1
@@ -764,7 +764,7 @@ class TritonKernel(Kernel):
         self.reduction_hint = reduction_hint
         self.index_dtype = index_dtype
         # Upper bounds for indirect_indexing and their str representation
-        self.indirect_max_sizes: Dict[Tuple[str, str], [sympy.Expr, str]] = {}
+        self.indirect_max_sizes: Dict[Tuple[str, str], List[Union[sympy.Expr, str]]] = {}
         self.last_usage = set()
 
         self.persistent_reduction = self.should_use_persistent_reduction()
@@ -870,7 +870,7 @@ class TritonKernel(Kernel):
         groups: List[sympy.Expr], lengths: List[List[sympy.Expr]]
     ):
         sv = V.graph.sizevars
-        new_ranges = [[] for _ in groups]
+        new_ranges: List[Any]= [[] for _ in groups]
         remaining = [sv.simplify(g) for g in groups]
         var_count = itertools.count()
 
@@ -1243,7 +1243,7 @@ class TritonKernel(Kernel):
                     IndirectAssertLine(line, var, mask, self.indirect_max_sizes)
                 )
 
-            self.indirect_max_sizes[map_key] = (size, self.index_to_str(size))
+            self.indirect_max_sizes[map_key] = [(size, self.index_to_str(size))]
 
         return sympy_symbol(str(var))
 
@@ -2043,7 +2043,7 @@ class TritonScheduling:
             assert rnumel1 == 1 and rnumel2 != 1
             if numel1 == numel2 * rnumel2:
                 if not all(
-                    TritonKernel.is_compatible((numel2, rnumel2), n.get_ranges())
+                    TritonKernel.is_compatible([numel2, rnumel2], n.get_ranges())
                     for n in node1.get_nodes()
                 ):
                     return False
@@ -2067,8 +2067,8 @@ class TritonScheduling:
     can_fuse_horizontal = can_fuse
 
     def generate_node_schedule(self, nodes, numel, rnumel):
-        node_schedule = []
-        current_loop_writes = set()
+        node_schedule: List[Any] = []
+        current_loop_writes: Set[int] = set()
         is_current_reductions = set()
         done = set()
 
@@ -2495,7 +2495,7 @@ class TritonScheduling:
                 )
                 >= 0
             ):
-                tilings.append(CandidateTiling(tiled_groups, score, dep.name))
+                tilings.append(CandidateTiling(tiled_groups, score, dep.name))# type: ignore[arg-type]
         return tilings
 
     @classmethod
@@ -2519,7 +2519,7 @@ class TritonScheduling:
             return (numel, reduction_numel)
 
         seen_names = set()
-        candidate_tiles = collections.Counter()
+        candidate_tiles: Counter = collections.Counter()
         for node in EnableReduction.filter(node_schedule):
             for tiling in cls.candidate_tilings(node):
                 if tiling.name in seen_names:
@@ -2558,7 +2558,7 @@ class TritonScheduling:
         for tiled_groups in ranked_tilings:
             new_groups = (*tiled_groups, reduction_numel)
             if all(
-                TritonKernel.is_compatible(new_groups, node.get_ranges())
+                TritonKernel.is_compatible(new_groups, node.get_ranges()) # type: ignore[arg-type]
                 for node in node_schedule
                 if isinstance(node, scheduler.SchedulerNode)
             ):
@@ -2574,8 +2574,7 @@ class TritonScheduling:
 class CandidateTiling:
     tiling: List[sympy.Expr]
     score: int  # higher is better
-    name: str = None
-
+    name: Optional[str] = None
     @staticmethod
     def is_good_size(s):
         """Somewhat arbitrary heuristic used to boost scores for some sizes"""
