@@ -3,6 +3,7 @@ import inspect
 import re
 import weakref
 from collections import OrderedDict
+from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import sympy
@@ -17,6 +18,8 @@ from torch._decomp import core_aten_decompositions, get_decompositions
 from torch._dispatch.python import enable_python_dispatcher
 from torch._dynamo.eval_frame import Constraint
 from torch._dynamo.exc import UserError, UserErrorType
+from torch._export.exported_program import ModuleCallEntry
+from torch._export.passes.collect_tracepoints_pass import CollectTracepointsPass
 from torch._functorch.aot_autograd import aot_export_module
 from torch._functorch.eager_transforms import functionalize
 from torch._guards import detect_fake_mode
@@ -34,14 +37,17 @@ from torch.utils._sympy.value_ranges import ValueRangeError, ValueRanges
 
 from .exported_program import (
     _process_constraints,
-    combine_args_kwargs,
     CallSpec,
+    combine_args_kwargs,
     ExportBackwardSignature,
     ExportedProgram,
     ExportGraphSignature,
 )
+from .passes.add_runtime_assertions_for_constraints_pass import (
+    _AddRuntimeAssertionsForInlineConstraintsPass,
+)
 from .passes.replace_sym_size_ops_pass import _ReplaceSymSizeOpPass
-from .passes.add_runtime_assertions_for_constraints_pass import _AddRuntimeAssertionsForInlineConstraintsPass
+from .wrappers import _wrap_submodules
 
 # Note - [On Export Dynamic Dimension UX]
 #
@@ -125,6 +131,8 @@ def export(
     args: Tuple[Any],
     kwargs: Optional[Dict[str, Any]] = None,
     constraints: Optional[List[Constraint]] = None,
+    *,
+    preserve_module_call_signature: Tuple[str] = (),
 ) -> ExportedProgram:
     """
     Traces either an nn.Module's forward function or just a callable with PyTorch
@@ -140,6 +148,9 @@ def export(
         constraints: A optional list of constraints on the dynamic arguments specifying
             their possible range of their shapes
 
+        preserve_module_call_signature: A list of submodule paths for which the original
+            calling conventions are preserved as metadata.
+
     Returns:
         An ExportedProgram containing the traced method.
     """
@@ -152,19 +163,21 @@ def export(
 
     with torch._dynamo.config.patch(dataclasses.asdict(DEFAULT_EXPORT_DYNAMO_CONFIG)):  # type: ignore[attr-defined]
         try:
+            module_call_signatures = {}
             # TODO hack to skip dynamo
             if isinstance(f, torch.fx.GraphModule) and "is_torch_exported" in f.meta:
                 gm_torch_level = f
             else:
-                gm_torch_level, _ = torch._dynamo.export(
-                    f,
-                    constraints=constraints,
-                    assume_static_by_default=True,
-                    tracing_mode="symbolic",
-                )(
-                    *args,
-                    **kwargs,
-                )
+                with _wrap_submodules(f, preserve_module_call_signature, module_call_signatures):
+                    gm_torch_level, _ = torch._dynamo.export(
+                        f,
+                        constraints=constraints,
+                        assume_static_by_default=True,
+                        tracing_mode="symbolic",
+                    )(
+                        *args,
+                        **kwargs,
+                    )
 
             params_buffers: OrderedDict[str, Union[torch.Tensor, torch.nn.Parameter]] = OrderedDict()
             for name, param in gm_torch_level.named_parameters(recurse=True, remove_duplicate=False):
@@ -325,11 +338,14 @@ def export(
                 params_buffers,
                 range_constraints,
                 equality_constraints,
+                [ModuleCallEntry(fqn, sig) for fqn, sig in module_call_signatures.items()],
             )
 
             exported_program = exported_program.transform(
                 _AddRuntimeAssertionsForInlineConstraintsPass(range_constraints, equality_constraints)
             )
+            if len(preserve_module_call_signature) > 0:
+                exported_program = exported_program.transform(CollectTracepointsPass(module_call_signatures))
             return exported_program.transform(_ReplaceSymSizeOpPass())
 
         except (ConstraintViolationError, ValueRangeError) as e:
