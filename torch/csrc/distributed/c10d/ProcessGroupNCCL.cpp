@@ -444,7 +444,7 @@ bool ProcessGroupNCCL::WorkNCCL::checkTimeout(
       currentTimepoint - workStartTime_);
   auto workTimeout = timeout ? *timeout : opTimeout_;
 
-  if (timeElapsed.count() < workTimeout.count())
+  if (timeElapsed < workTimeout)
     return false;
 
   // Timed out
