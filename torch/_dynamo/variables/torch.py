@@ -80,7 +80,6 @@ constant_fold_functions = [
     torch._C._get_privateuse1_backend_name,
 ]
 
-
 if torch.distributed.is_available():
     constant_fold_functions.append(torch.distributed.is_initialized)
 
